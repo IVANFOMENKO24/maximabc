@@ -5,6 +5,7 @@ __pycache__/
 
 file_ids_cache.json
 messages.db
+phrase_cache/
 
 .venv/
 venv/
