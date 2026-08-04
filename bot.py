@@ -156,6 +156,19 @@ def find_ffmpeg() -> str:
         except (PermissionError, OSError):
             continue
 
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.isfile(exe):
+            log(f"imageio_ffmpeg fallback: {exe}")
+            try:
+                os.chmod(exe, 0o755)
+            except OSError:
+                pass
+            return exe
+    except Exception as e:
+        log(f"imageio-ffmpeg не доступен: {e}")
+
     logging.warning("find_ffmpeg: бинарник не найден, возвращаю 'ffmpeg' как есть (отправка кружков сломается)")
     return "ffmpeg"
 

@@ -19,6 +19,8 @@ RUN pip install --upgrade pip \
 COPY . .
 
 RUN mkdir -p /app/data /app/phrase_cache \
- && chmod -R 777 /app/data /app/phrase_cache
+ && chmod -R 777 /app/data /app/phrase_cache \
+ && chmod +x /app/entrypoint.sh 2>/dev/null || true
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "-u", "bot.py"]
