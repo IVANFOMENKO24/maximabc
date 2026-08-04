@@ -1,18 +1,63 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import FSInputFile
 
-from config import BOT_TOKEN, CACHE_FILE, LETTERS_FOLDER, RUSSIAN_LETTERS
+from config import BOT_TOKEN, CACHE_FILE, LETTERS_FOLDER, PHRASE_CACHE_DIR, RUSSIAN_LETTERS
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "messages.db")
+
+os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
+
+
+def find_ffmpeg() -> str:
+    import shutil
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    candidates = [
+        r"C:\Users\иванка\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe",
+        r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\Gyan\FFmpeg\bin\ffmpeg.exe",
+    ]
+    appdata_local = os.environ.get("LOCALAPPDATA") or ""
+    if appdata_local:
+        capcut_root = os.path.join(appdata_local, "CapCut", "Apps")
+        if os.path.isdir(capcut_root):
+            try:
+                for item in sorted(os.listdir(capcut_root), reverse=True):
+                    cand = os.path.join(capcut_root, item, "ffmpeg.exe")
+                    if os.path.isfile(cand):
+                        candidates.append(cand)
+                        break
+            except OSError:
+                pass
+        winget_root = os.path.join(appdata_local, "Microsoft", "WinGet", "Packages")
+        try:
+            for name in os.listdir(winget_root):
+                if "Gyan.FFmpeg" in name:
+                    for root, _, files in os.walk(os.path.join(winget_root, name)):
+                        if "ffmpeg.exe" in files:
+                            candidates.append(os.path.join(root, "ffmpeg.exe"))
+        except OSError:
+            pass
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return "ffmpeg"
+
+
+FFMPEG_BIN = find_ffmpeg()
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -101,14 +146,100 @@ def get_letter_file_path(letter: str) -> str | None:
     return None
 
 
+def phrase_hash(letters: list[str]) -> str:
+    return hashlib.md5("".join(letters).encode("utf-8")).hexdigest()
+
+
+def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
+    work_dir = tempfile.mkdtemp(prefix="tgletter_")
+    list_file_path = os.path.join(work_dir, "files.txt")
+    try:
+        norm_paths: list[str] = []
+        for i, p in enumerate(letter_paths):
+            norm_out = os.path.join(work_dir, f"norm_{i:04d}.mp4")
+            norm_cmd = [
+                FFMPEG_BIN, "-y",
+                "-i", p,
+                "-map", "0:v:0", "-map", "0:a:0?",
+                "-vf", "fps=30,format=yuv420p",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-ar", "48000", "-ac", "1", "-b:a", "96k",
+                "-video_track_timescale", "15360",
+                "-movflags", "+faststart",
+                norm_out,
+            ]
+            r = subprocess.run(norm_cmd, capture_output=True, text=True)
+            if r.returncode != 0:
+                logging.error(f"normalize {p} failed: {r.stderr}")
+                return False
+            norm_paths.append(norm_out)
+
+        with open(list_file_path, "w", encoding="utf-8") as f:
+            for p in norm_paths:
+                escaped = p.replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+
+        concat_out = os.path.join(work_dir, "concat.mp4")
+        concat_cmd = [
+            FFMPEG_BIN, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_file_path,
+            "-c", "copy",
+            concat_out,
+        ]
+        r = subprocess.run(concat_cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            logging.error(f"ffmpeg concat failed: {r.stderr}")
+            return False
+
+        vf = (
+            "scale=360:360:force_original_aspect_ratio=decrease,"
+            "pad=360:360:(ow-iw)/2:(oh-ih)/2:color=black,"
+            "setsar=1,format=yuv420p,fps=30"
+        )
+        reencode_cmd = [
+            FFMPEG_BIN, "-y",
+            "-t", "60",
+            "-i", concat_out,
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "48000", "-ac", "1", "-b:a", "96k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        r2 = subprocess.run(reencode_cmd, capture_output=True, text=True)
+        if r2.returncode != 0:
+            logging.error(f"ffmpeg reencode failed: {r2.stderr}")
+            return False
+        return True
+    finally:
+        try:
+            for root, _, files in os.walk(work_dir, topdown=False):
+                for name in files:
+                    try:
+                        os.remove(os.path.join(root, name))
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message) -> None:
-    cached_count = sum(1 for l in RUSSIAN_LETTERS if l in CACHE)
+    phrase_count = sum(1 for k in CACHE if k.startswith("phrase:"))
     await message.answer(
-        "здарова бродяга, отправь мне любой текст, и я отправлю тебе кружки с буквами, "
+        "здарова бродяга, отправь мне любой текст, и я склею все буквы в один кружок телеграмма, "
         "отрпавишь кенту, пока разраб бота включил ноут. "
-        "Если чо первая отправка буквы будет чуть медленне, потом будет быстрее из-за кэша! хехе\n\n"
-        f"⚡ В кэше уже: {cached_count} из {len(RUSSIAN_LETTERS)} букв"
+        "Если чо первая отправка фразы будет чуть медленнее, потом будет быстрее из-за кэша! хехе\n\n"
+        f"⚡ В кэше фраз: {phrase_count}"
     )
 
 
@@ -220,64 +351,103 @@ async def text_handler(message: types.Message) -> None:
         return
 
     text_lower = text.lower()
-    tasks = []
+    letters: list[str] = []
+    missing_letters: list[str] = []
 
     for char in text_lower:
         if char == " ":
             continue
         if char not in RUSSIAN_LETTERS:
             continue
-        tasks.append(char)
+        letters.append(char)
 
-    if not tasks:
+    if not letters:
         await message.answer("В тексте не найдено русских букв для отправки.")
         return
 
-    status_msg = await message.answer(f"Подготавливаю {len(tasks)} кружков...")
+    letter_paths: list[str] = []
+    for letter in letters:
+        path = get_letter_file_path(letter)
+        if path:
+            letter_paths.append(path)
+        else:
+            missing_letters.append(letter)
+
+    if missing_letters:
+        missing = ", ".join(set(missing_letters))
+        await message.answer(f"⚠️ Не найдены файлы для букв: {missing}")
+        if not letter_paths:
+            return
+
+    if len(letter_paths) < len(letters):
+        await message.answer("⚠️ Часть букв не найдена, кружок будет из оставшихся.")
+
+    cache_key = "phrase:" + phrase_hash(letters)
     cache_changed = False
-    success_count = 0
 
-    for idx, letter in enumerate(tasks, start=1):
-        try:
-            if letter in CACHE:
-                await bot.send_video_note(
-                    chat_id=message.chat.id,
-                    video_note=CACHE[letter]
-                )
-            else:
-                file_path = get_letter_file_path(letter)
-                if not file_path:
-                    await message.answer(f"⚠️ Файл для буквы '{letter}' не найден в папке!")
-                    continue
-
-                input_file = FSInputFile(file_path)
-                sent = await bot.send_video_note(
-                    chat_id=message.chat.id,
-                    video_note=input_file
-                )
-
-                if sent.video_note:
-                    new_file_id = sent.video_note.file_id
-                    CACHE[letter] = new_file_id
-                    cache_changed = True
-                    logging.info(f"Сохранен file_id для буквы '{letter}': {new_file_id}")
-
-            success_count += 1
-
-            if idx < len(tasks):
-                await asyncio.sleep(0.6)
-
-        except Exception as e:
-            logging.error(f"Ошибка с буквой '{letter}': {e}")
-            await message.answer(f"❌ Ошибка при отправке буквы '{letter}': {e}")
-
-    if cache_changed:
-        save_cache(CACHE)
+    status_msg = await message.answer("Подготавливаю кружок...")
 
     try:
-        await status_msg.edit_text(f"Готово! Отправлено {success_count} из {len(tasks)} кружков.")
-    except Exception:
-        pass
+        if cache_key in CACHE:
+            try:
+                await bot.send_video_note(
+                    chat_id=message.chat.id,
+                    video_note=CACHE[cache_key]
+                )
+                try:
+                    await status_msg.edit_text("Готово! Кружок отправлен (из кэша file_id).")
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                logging.warning(f"Не удалось отправить по кэшированному file_id: {e}, пробуем файлом.")
+
+        output_filename = phrase_hash(letters) + ".mp4"
+        output_path = os.path.join(PHRASE_CACHE_DIR, output_filename)
+
+        if not os.path.exists(output_path):
+            try:
+                await status_msg.edit_text(f"Склеиваю {len(letter_paths)} букв в один кружок...")
+            except Exception:
+                pass
+            ok = concat_letter_videos(letter_paths, output_path)
+            if not ok:
+                try:
+                    await status_msg.edit_text(
+                        "❌ Ошибка при склейке видео. Возможно, не установлен ffmpeg.\n"
+                        "Установи ffmpeg и добавь его в PATH (https://ffmpeg.org/download.html)."
+                    )
+                except Exception:
+                    pass
+                return
+
+        input_file = FSInputFile(output_path)
+        sent = await bot.send_video_note(
+            chat_id=message.chat.id,
+            video_note=input_file
+        )
+
+        if sent.video_note:
+            new_file_id = sent.video_note.file_id
+            CACHE[cache_key] = new_file_id
+            cache_changed = True
+            logging.info(f"Сохранен file_id для фразы ({len(letters)} букв): {new_file_id}")
+
+        try:
+            await status_msg.edit_text("Готово! Один кружок с фразой отправлен.")
+        except Exception:
+            pass
+
+    except Exception as e:
+        logging.error(f"Ошибка при отправке кружка: {e}")
+        try:
+            await status_msg.edit_text(f"❌ Ошибка: {e}")
+        except Exception:
+            pass
+
+    finally:
+        if cache_changed:
+            save_cache(CACHE)
 
 
 async def main() -> None:
