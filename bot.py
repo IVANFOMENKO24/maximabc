@@ -690,6 +690,81 @@ async def text_handler(message: types.Message) -> None:
             save_cache(CACHE)
 
 
+def _runtime_install_ffmpeg() -> bool:
+    if os.name != "posix" or not os.path.isfile("/etc/debian_version"):
+        return False
+    try:
+        import ctypes
+        is_root = False
+        try:
+            is_root = ctypes.CDLL("libc.so.6").geteuid() == 0
+        except Exception:
+            is_root = os.geteuid() == 0 if hasattr(os, "geteuid") else False
+        if not is_root:
+            return False
+    except Exception:
+        return False
+
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    env["PATH"] = (
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"
+        + env.get("PATH", "")
+    )
+
+    def _run(cmd: list[str], timeout: int = 300) -> tuple[int, str]:
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, env=env,
+            )
+            return r.returncode, (r.stderr or "") + (r.stdout or "")
+        except FileNotFoundError as e:
+            return 127, f"binary not found: {e}"
+        except Exception as e:
+            return 1, str(e)
+
+    def _which(name: str) -> str | None:
+        import shutil as _s
+        w = _s.which(name, path=env.get("PATH"))
+        if w and os.path.isfile(w):
+            return w
+        for p in env.get("PATH", "").split(os.pathsep):
+            c = os.path.join(p, name)
+            if os.path.isfile(c):
+                return c
+        return None
+
+    apt_get = _which("apt-get") or "/usr/bin/apt-get"
+    if not os.path.isfile(apt_get):
+        return False
+
+    logging.info("FFmpeg не найден, пробую автоматически поставить через apt-get (может занять 1-2 мин)...")
+
+    rc, out = _run([apt_get, "-y", "update"], 180)
+    if rc != 0:
+        logging.warning(f"apt-get update failed (rc={rc}): {out[-400:]}")
+
+    rc, out = _run([apt_get, "-y", "--no-install-recommends", "install", "ffmpeg", "ca-certificates"], 480)
+    if rc != 0:
+        logging.error(f"apt-get install ffmpeg failed (rc={rc}): {out[-600:]}")
+        return False
+
+    logging.info("apt-get install ffmpeg завершён успешно, перепроверяю...")
+    import shutil as _s
+    fresh = _s.which("ffmpeg") or _s.which("ffmpeg", path=env.get("PATH"))
+    if not fresh:
+        for p in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+            if os.path.isfile(p):
+                fresh = p
+                break
+    if not fresh:
+        logging.error("FFmpeg после установки не найден в PATH")
+        return False
+    global FFMPEG_BIN
+    FFMPEG_BIN = fresh
+    return True
+
+
 async def main() -> None:
     global FFMPEG_BIN
     _register_cleanup()
@@ -699,6 +774,13 @@ async def main() -> None:
     FFMPEG_BIN = find_ffmpeg()
 
     ok, info = check_ffmpeg(FFMPEG_BIN)
+    if not ok:
+        try:
+            if _runtime_install_ffmpeg():
+                ok, info = check_ffmpeg(FFMPEG_BIN)
+        except Exception as e:
+            logging.warning(f"runtime ffmpeg install attempt error: {e}")
+
     if ok:
         logging.info(f"FFmpeg найден: {FFMPEG_BIN} — {info}")
     else:
