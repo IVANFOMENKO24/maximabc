@@ -22,20 +22,58 @@ os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
 
 def find_ffmpeg() -> str:
     import shutil
+
     if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
         return FFMPEG_PATH
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
+
+    which_path = shutil.which("ffmpeg")
+    if which_path and os.path.isfile(which_path):
+        return which_path
+
+    home = os.path.expanduser("~")
     candidates = [
         "/usr/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
         "/opt/homebrew/bin/ffmpeg",
+        "/opt/homebrew/sbin/ffmpeg",
+        "/usr/pkg/bin/ffmpeg",
+        "/usr/ports/multimedia/ffmpeg/work/ffmpeg*/ffmpeg",
         "/snap/bin/ffmpeg",
+        "/opt/ffmpeg/bin/ffmpeg",
+        "/opt/ffmpeg/ffmpeg",
+        "/usr/local/ffmpeg/bin/ffmpeg",
+        "/home/bin/ffmpeg",
+        os.path.join(home, ".local", "bin", "ffmpeg"),
+        os.path.join(home, "bin", "ffmpeg"),
+        os.path.join(home, ".nix-profile", "bin", "ffmpeg"),
         r"C:\Users\иванка\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe",
         r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
         r"C:\Program Files\Gyan\FFmpeg\bin\ffmpeg.exe",
+        r"C:\FFmpeg\bin\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
     ]
+
+    env_path = os.environ.get("PATH", "")
+    path_dirs = []
+    if env_path:
+        path_dirs = [p for p in env_path.split(os.pathsep) if p]
+    for d in path_dirs:
+        for name in ("ffmpeg", "ffmpeg.exe"):
+            cand = os.path.join(d, name)
+            if os.path.isfile(cand) and cand not in candidates:
+                candidates.append(cand)
+
+    nix_root = "/nix/store"
+    if os.path.isdir(nix_root):
+        try:
+            for entry in sorted(os.listdir(nix_root), reverse=True):
+                if "ffmpeg" in entry.lower():
+                    cand = os.path.join(nix_root, entry, "bin", "ffmpeg")
+                    if os.path.isfile(cand):
+                        candidates.append(cand)
+        except OSError:
+            pass
+
     appdata_local = os.environ.get("LOCALAPPDATA") or ""
     if appdata_local:
         capcut_root = os.path.join(appdata_local, "CapCut", "Apps")
@@ -57,23 +95,40 @@ def find_ffmpeg() -> str:
                             candidates.append(os.path.join(root, "ffmpeg.exe"))
         except OSError:
             pass
+
     for c in candidates:
-        if os.path.isfile(c):
-            return c
+        try:
+            if os.path.isfile(c):
+                return c
+        except OSError:
+            continue
+
     return "ffmpeg"
 
 
 def check_ffmpeg(binary: str) -> tuple[bool, str]:
     try:
-        r = subprocess.run([binary, "-version"], capture_output=True, text=True, timeout=15)
+        env = os.environ.copy()
+        env["PATH"] = os.environ.get("PATH", "")
+        r = subprocess.run(
+            [binary, "-version"],
+            capture_output=True, text=True, timeout=20, env=env,
+        )
         if r.returncode == 0:
             first_line = (r.stdout or "").splitlines()[0] if (r.stdout or "").splitlines() else "ok"
             return True, first_line.strip()
-        return False, f"exit code {r.returncode}: {r.stderr.strip()[:200]}"
+        err_tail = (r.stderr or "").strip().splitlines()[-1] if (r.stderr or "").strip().splitlines() else ""
+        return False, f"exit code {r.returncode}: {err_tail[:200]}"
     except FileNotFoundError:
-        return False, "binary not found at this path"
+        return False, "binary not found (FileNotFoundError)"
+    except PermissionError as e:
+        return False, f"permission denied: {e}"
+    except subprocess.TimeoutExpired:
+        return False, "timeout calling --version (20s)"
+    except OSError as e:
+        return False, f"OS error ({type(e).__name__}): {e}"
     except Exception as e:
-        return False, str(e)
+        return False, f"{type(e).__name__}: {e}"
 
 
 FFMPEG_BIN = find_ffmpeg()
@@ -406,15 +461,15 @@ async def text_handler(message: types.Message) -> None:
 
     ffmpeg_ok, ffmpeg_info = check_ffmpeg(FFMPEG_BIN)
     if not ffmpeg_ok and cache_key not in CACHE:
+        logging.error(
+            f"FFmpeg check FAILED before handling phrase. "
+            f"Used FFMPEG_BIN={FFMPEG_BIN!r}, info={ffmpeg_info}. "
+            f"Install hint: apt-get install -y ffmpeg (Debian/Ubuntu), dnf install -y ffmpeg (CentOS/Fedora), "
+            f"brew install ffmpeg (macOS). Or set env var FFMPEG_PATH to absolute binary path."
+        )
         await message.answer(
-            "❌ На сервере не установлен FFmpeg — без него не могу склеить буквы в кружок.\n\n"
-            "Установка (выполни на сервере):\n"
-            "  • Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y ffmpeg\n"
-            "  • CentOS/Fedora: sudo dnf install -y ffmpeg\n"
-            "  • macOS (brew): brew install ffmpeg\n"
-            "  • Windows (winget): winget install -e --id Gyan.FFmpeg\n\n"
-            "Либо задай точный путь к бинарнику через переменную окружения FFMPEG_PATH или поле config.FFMPEG_PATH.\n\n"
-            f"(Текущий путь к ffmpeg: {FFMPEG_BIN}, причина: {ffmpeg_info})"
+            "⚠️ Временно не могу создать кружок — серверные настройки подлечивают.\n"
+            "Админ уже в курсе, скоро всё починят 🙏"
         )
         return
 
