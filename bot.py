@@ -235,7 +235,41 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _in_container() -> bool:
+    try:
+        if os.path.isfile("/.dockerenv") or os.path.isfile("/run/.containerenv"):
+            return True
+    except Exception:
+        pass
+    try:
+        with open("/proc/1/cgroup", "r", errors="ignore") as f:
+            data = f.read()
+        if "docker" in data or "kubepods" in data or "lxc" in data or "containerd" in data:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def acquire_bot_lock() -> None:
+    my_pid = os.getpid()
+    if my_pid == 1 or _in_container():
+        logging.info(
+            "PID-lock пропущен: мы внутри контейнера (PID 1 или /.dockerenv). "
+            "Хостинг сам гарантирует один экземпляр."
+        )
+        try:
+            if os.path.exists(PID_FILE):
+                try:
+                    os.remove(PID_FILE)
+                except OSError:
+                    pass
+            with open(PID_FILE, "w") as f:
+                f.write(str(my_pid))
+        except OSError:
+            pass
+        return
+
     old_pid: int | None = None
     try:
         if os.path.exists(PID_FILE):
@@ -247,6 +281,13 @@ def acquire_bot_lock() -> None:
             except (OSError, ValueError):
                 old_pid = None
     except Exception:
+        old_pid = None
+
+    if old_pid is not None and old_pid == my_pid:
+        old_pid = None
+
+    if old_pid is not None and old_pid == 1:
+        logging.warning(f"PID-файл указывает на PID 1 (init/контейнер) — игнорирую, не убиваю.")
         old_pid = None
 
     if old_pid is not None and _pid_alive(old_pid):
@@ -759,7 +800,7 @@ async def text_handler(message: types.Message) -> None:
 
 
 def _runtime_install_ffmpeg() -> bool:
-    if os.name != "posix" or not os.path.isfile("/etc/debian_version"):
+    if os.name != "posix":
         return False
     try:
         import ctypes
@@ -776,7 +817,7 @@ def _runtime_install_ffmpeg() -> bool:
     env = os.environ.copy()
     env["DEBIAN_FRONTEND"] = "noninteractive"
     env["PATH"] = (
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:"
         + env.get("PATH", "")
     )
 
@@ -802,35 +843,62 @@ def _runtime_install_ffmpeg() -> bool:
                 return c
         return None
 
-    apt_get = _which("apt-get") or "/usr/bin/apt-get"
-    if not os.path.isfile(apt_get):
-        return False
-
-    logging.info("FFmpeg не найден, пробую автоматически поставить через apt-get (может занять 1-2 мин)...")
-
-    rc, out = _run([apt_get, "-y", "update"], 180)
-    if rc != 0:
-        logging.warning(f"apt-get update failed (rc={rc}): {out[-400:]}")
-
-    rc, out = _run([apt_get, "-y", "--no-install-recommends", "install", "ffmpeg", "ca-certificates"], 480)
-    if rc != 0:
-        logging.error(f"apt-get install ffmpeg failed (rc={rc}): {out[-600:]}")
-        return False
-
-    logging.info("apt-get install ffmpeg завершён успешно, перепроверяю...")
-    import shutil as _s
-    fresh = _s.which("ffmpeg") or _s.which("ffmpeg", path=env.get("PATH"))
-    if not fresh:
-        for p in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg"):
+    def _locate_ffmpeg() -> str | None:
+        import shutil as _s
+        fresh = _s.which("ffmpeg") or _s.which("ffmpeg", path=env.get("PATH"))
+        if fresh:
+            return fresh
+        for p in ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"):
             if os.path.isfile(p):
-                fresh = p
-                break
-    if not fresh:
-        logging.error("FFmpeg после установки не найден в PATH")
-        return False
-    global FFMPEG_BIN
-    FFMPEG_BIN = fresh
-    return True
+                return p
+        return None
+
+    apt_get = _which("apt-get")
+    apk = _which("apk")
+    dnf = _which("dnf") or _which("yum")
+
+    if apt_get:
+        logging.info("FFmpeg не найден, пробую автоматически поставить через apt-get (может занять 1-2 мин)...")
+        rc, out = _run([apt_get, "-y", "update"], 120)
+        if rc != 0:
+            logging.warning(f"apt-get update failed (rc={rc}): {out[-300:]}")
+        rc, out = _run(
+            [apt_get, "-y", "--no-install-recommends", "install", "ffmpeg", "ca-certificates"],
+            420,
+        )
+        if rc == 0:
+            logging.info("apt-get install ffmpeg завершён успешно, перепроверяю...")
+            fresh = _locate_ffmpeg()
+            if fresh:
+                global FFMPEG_BIN
+                FFMPEG_BIN = fresh
+                return True
+        else:
+            logging.error(f"apt-get install ffmpeg failed (rc={rc}): {out[-500:]}")
+
+    if apk:
+        logging.info("FFmpeg не найден, пробую автоматически поставить через apk add (Alpine)...")
+        rc, out = _run([apk, "add", "--no-cache", "ffmpeg", "ca-certificates"], 300)
+        if rc == 0:
+            fresh = _locate_ffmpeg()
+            if fresh:
+                FFMPEG_BIN = fresh
+                return True
+        else:
+            logging.error(f"apk add ffmpeg failed (rc={rc}): {out[-500:]}")
+
+    if dnf:
+        logging.info("FFmpeg не найден, пробую автоматически поставить через dnf/yum...")
+        rc, out = _run([dnf, "-y", "install", "ffmpeg"], 600)
+        if rc == 0:
+            fresh = _locate_ffmpeg()
+            if fresh:
+                FFMPEG_BIN = fresh
+                return True
+        else:
+            logging.error(f"{dnf} install ffmpeg failed (rc={rc}): {out[-500:]}")
+
+    return False
 
 
 async def main() -> None:
