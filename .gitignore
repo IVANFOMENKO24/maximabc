@@ -6,6 +6,11 @@ __pycache__/
 file_ids_cache.json
 messages.db
 phrase_cache/
+bot.pid
+
+.env
+.env.local
+.env.*.local
 
 .venv/
 venv/

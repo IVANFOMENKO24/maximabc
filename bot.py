@@ -23,56 +23,19 @@ os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
 def find_ffmpeg() -> str:
     import shutil
 
-    if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
-        return FFMPEG_PATH
+    log = lambda msg: logging.info(f"[find_ffmpeg] {msg}")
 
-    which_path = shutil.which("ffmpeg")
-    if which_path and os.path.isfile(which_path):
-        return which_path
+    if FFMPEG_PATH:
+        if os.path.isfile(FFMPEG_PATH):
+            log(f"использую config.FFMPEG_PATH: {FFMPEG_PATH}")
+            return FFMPEG_PATH
+        log(f"config.FFMPEG_PATH={FFMPEG_PATH!r} не является файлом")
 
-    home = os.path.expanduser("~")
-    candidates = [
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/opt/homebrew/bin/ffmpeg",
-        "/opt/homebrew/sbin/ffmpeg",
-        "/usr/pkg/bin/ffmpeg",
-        "/usr/ports/multimedia/ffmpeg/work/ffmpeg*/ffmpeg",
-        "/snap/bin/ffmpeg",
-        "/opt/ffmpeg/bin/ffmpeg",
-        "/opt/ffmpeg/ffmpeg",
-        "/usr/local/ffmpeg/bin/ffmpeg",
-        "/home/bin/ffmpeg",
-        os.path.join(home, ".local", "bin", "ffmpeg"),
-        os.path.join(home, "bin", "ffmpeg"),
-        os.path.join(home, ".nix-profile", "bin", "ffmpeg"),
-        r"C:\Users\иванка\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe",
-        r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\Gyan\FFmpeg\bin\ffmpeg.exe",
-        r"C:\FFmpeg\bin\ffmpeg.exe",
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-    ]
-
-    env_path = os.environ.get("PATH", "")
-    path_dirs = []
-    if env_path:
-        path_dirs = [p for p in env_path.split(os.pathsep) if p]
-    for d in path_dirs:
-        for name in ("ffmpeg", "ffmpeg.exe"):
-            cand = os.path.join(d, name)
-            if os.path.isfile(cand) and cand not in candidates:
-                candidates.append(cand)
-
-    nix_root = "/nix/store"
-    if os.path.isdir(nix_root):
-        try:
-            for entry in sorted(os.listdir(nix_root), reverse=True):
-                if "ffmpeg" in entry.lower():
-                    cand = os.path.join(nix_root, entry, "bin", "ffmpeg")
-                    if os.path.isfile(cand):
-                        candidates.append(cand)
-        except OSError:
-            pass
+    for name in ("ffmpeg", "ffmpeg.exe"):
+        which_path = shutil.which(name)
+        if which_path and os.path.isfile(which_path):
+            log(f"shutil.which({name!r}) -> {which_path}")
+            return which_path
 
     appdata_local = os.environ.get("LOCALAPPDATA") or ""
     if appdata_local:
@@ -82,27 +45,112 @@ def find_ffmpeg() -> str:
                 for item in sorted(os.listdir(capcut_root), reverse=True):
                     cand = os.path.join(capcut_root, item, "ffmpeg.exe")
                     if os.path.isfile(cand):
-                        candidates.append(cand)
-                        break
-            except OSError:
-                pass
+                        log(f"CapCut found: {cand}")
+                        return cand
+            except OSError as e:
+                log(f"CapCut scan error: {e}")
+
         winget_root = os.path.join(appdata_local, "Microsoft", "WinGet", "Packages")
-        try:
-            for name in os.listdir(winget_root):
-                if "Gyan.FFmpeg" in name:
-                    for root, _, files in os.walk(os.path.join(winget_root, name)):
-                        if "ffmpeg.exe" in files:
-                            candidates.append(os.path.join(root, "ffmpeg.exe"))
-        except OSError:
-            pass
+        if os.path.isdir(winget_root):
+            try:
+                for pkg_name in sorted(os.listdir(winget_root), reverse=True):
+                    if "ffmpeg" in pkg_name.lower():
+                        pkg_dir = os.path.join(winget_root, pkg_name)
+                        for root, _, files in os.walk(pkg_dir):
+                            if "ffmpeg.exe" in files:
+                                cand = os.path.join(root, "ffmpeg.exe")
+                                if os.path.isfile(cand):
+                                    log(f"WinGet found: {cand}")
+                                    return cand
+            except OSError as e:
+                log(f"WinGet scan error: {e}")
+
+    home = os.path.expanduser("~")
+    candidates = [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/opt/homebrew/sbin/ffmpeg",
+        "/usr/pkg/bin/ffmpeg",
+        "/snap/bin/ffmpeg",
+        "/opt/ffmpeg/bin/ffmpeg",
+        "/opt/ffmpeg/ffmpeg",
+        "/usr/local/ffmpeg/bin/ffmpeg",
+        "/home/bin/ffmpeg",
+        os.path.join(home, ".local", "bin", "ffmpeg"),
+        os.path.join(home, "bin", "ffmpeg"),
+        os.path.join(home, ".nix-profile", "bin", "ffmpeg"),
+        r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\Gyan\FFmpeg\bin\ffmpeg.exe",
+        r"C:\FFmpeg\bin\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+    ]
 
     for c in candidates:
         try:
             if os.path.isfile(c):
+                log(f"candidate found: {c}")
                 return c
         except OSError:
             continue
 
+    env_path = os.environ.get("PATH", "")
+    if env_path:
+        for d in env_path.split(os.pathsep):
+            if not d:
+                continue
+            for name in ("ffmpeg", "ffmpeg.exe"):
+                cand = os.path.join(d, name)
+                try:
+                    if os.path.isfile(cand):
+                        log(f"PATH found: {cand}")
+                        return cand
+                except OSError:
+                    continue
+
+    nix_root = "/nix/store"
+    if os.path.isdir(nix_root):
+        try:
+            for entry in sorted(os.listdir(nix_root), reverse=True):
+                if "ffmpeg" in entry.lower():
+                    cand = os.path.join(nix_root, entry, "bin", "ffmpeg")
+                    if os.path.isfile(cand):
+                        log(f"nix found: {cand}")
+                        return cand
+        except OSError as e:
+            log(f"nix scan error: {e}")
+
+    if os.name == "nt":
+        drives = [f"{d}:\\" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{d}:\\")]
+    else:
+        drives = ["/usr", "/opt", "/home", "/nix", "/snap", "/app", "/var", "/bin", "/sbin"]
+        if os.path.isdir(home) and home not in drives:
+            drives.insert(0, home)
+
+    for root in drives:
+        if not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+                try:
+                    for name in filenames:
+                        if name in ("ffmpeg", "ffmpeg.exe"):
+                            cand = os.path.join(dirpath, name)
+                            try:
+                                if os.path.isfile(cand):
+                                    logging.info(f"find_ffmpeg found via walk {root}: {cand}")
+                                    return cand
+                            except OSError:
+                                pass
+                    for skip in ("proc", "sys", "dev", "$Recycle.Bin", "System Volume Information", "Windows"):
+                        if skip in dirnames:
+                            dirnames.remove(skip)
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            continue
+
+    logging.warning("find_ffmpeg: бинарник не найден, возвращаю 'ffmpeg' как есть (отправка кружков сломается)")
     return "ffmpeg"
 
 
@@ -131,10 +179,111 @@ def check_ffmpeg(binary: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-FFMPEG_BIN = find_ffmpeg()
+FFMPEG_BIN: str = ""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.pid")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                 f"Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return proc.returncode == 0 and str(pid) in (proc.stdout or "")
+        else:
+            os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def acquire_bot_lock() -> None:
+    old_pid: int | None = None
+    try:
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE, "r") as f:
+                    data = f.read().strip()
+                if data.isdigit():
+                    old_pid = int(data)
+            except (OSError, ValueError):
+                old_pid = None
+    except Exception:
+        old_pid = None
+
+    if old_pid is not None and _pid_alive(old_pid):
+        logging.warning(f"Обнаружен запущенный экземпляр бота (PID {old_pid}). Убиваю его, чтобы избежать ConflictError.")
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill.exe", "/F", "/PID", str(old_pid)],
+                    capture_output=True, timeout=15,
+                )
+            else:
+                os.kill(old_pid, 15)
+            for _ in range(20):
+                if not _pid_alive(old_pid):
+                    break
+                time.sleep(0.25)
+            else:
+                if os.name != "nt":
+                    try:
+                        os.kill(old_pid, 9)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logging.error(f"Не удалось убить старый процесс PID {old_pid}: {e}")
+
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        logging.warning(f"Не могу записать PID-файл {PID_FILE}: {e}")
+
+
+import signal
+import time
+
+_registered_cleanup = False
+
+
+def _register_cleanup() -> None:
+    global _registered_cleanup
+    if _registered_cleanup:
+        return
+    _registered_cleanup = True
+
+    def _cleanup(*_args):
+        try:
+            if os.path.exists(PID_FILE):
+                try:
+                    with open(PID_FILE, "r") as f:
+                        stored = f.read().strip()
+                except OSError:
+                    stored = ""
+                if stored == str(os.getpid()):
+                    try:
+                        os.remove(PID_FILE)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    try:
+        signal.signal(signal.SIGINT, _cleanup)
+        signal.signal(signal.SIGTERM, _cleanup)
+    except Exception:
+        pass
+    import atexit
+    atexit.register(_cleanup)
 
 
 def init_db() -> None:
@@ -539,8 +688,12 @@ async def text_handler(message: types.Message) -> None:
 
 
 async def main() -> None:
+    global FFMPEG_BIN
+    _register_cleanup()
+    acquire_bot_lock()
     init_db()
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    FFMPEG_BIN = find_ffmpeg()
 
     ok, info = check_ffmpeg(FFMPEG_BIN)
     if ok:
@@ -558,7 +711,7 @@ async def main() -> None:
         )
         logging.error(msg)
 
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
