@@ -1,6 +1,6 @@
 import os
 
-BOT_TOKEN = "8854118496:AAGNJN7zGmYMp_OHd8cebIpPyNuxrCisQns"
+BOT_TOKEN = "8922425438:AAHXfPwXmCuV3N5WqbvR7UjUeWpOrKxgrf8"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LETTERS_FOLDER = os.path.join(BASE_DIR, "letters")
