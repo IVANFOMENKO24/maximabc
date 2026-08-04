@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import FSInputFile
 
-from config import BOT_TOKEN, CACHE_FILE, LETTERS_FOLDER, PHRASE_CACHE_DIR, RUSSIAN_LETTERS
+from config import BOT_TOKEN, CACHE_FILE, FFMPEG_PATH, LETTERS_FOLDER, PHRASE_CACHE_DIR, RUSSIAN_LETTERS
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "messages.db")
 
@@ -22,10 +22,16 @@ os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
 
 def find_ffmpeg() -> str:
     import shutil
+    if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
+        return FFMPEG_PATH
     path = shutil.which("ffmpeg")
     if path:
         return path
     candidates = [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/snap/bin/ffmpeg",
         r"C:\Users\иванка\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe",
         r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
         r"C:\Program Files\Gyan\FFmpeg\bin\ffmpeg.exe",
@@ -55,6 +61,19 @@ def find_ffmpeg() -> str:
         if os.path.isfile(c):
             return c
     return "ffmpeg"
+
+
+def check_ffmpeg(binary: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run([binary, "-version"], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            first_line = (r.stdout or "").splitlines()[0] if (r.stdout or "").splitlines() else "ok"
+            return True, first_line.strip()
+        return False, f"exit code {r.returncode}: {r.stderr.strip()[:200]}"
+    except FileNotFoundError:
+        return False, "binary not found at this path"
+    except Exception as e:
+        return False, str(e)
 
 
 FFMPEG_BIN = find_ffmpeg()
@@ -385,6 +404,20 @@ async def text_handler(message: types.Message) -> None:
     cache_key = "phrase:" + phrase_hash(letters)
     cache_changed = False
 
+    ffmpeg_ok, ffmpeg_info = check_ffmpeg(FFMPEG_BIN)
+    if not ffmpeg_ok and cache_key not in CACHE:
+        await message.answer(
+            "❌ На сервере не установлен FFmpeg — без него не могу склеить буквы в кружок.\n\n"
+            "Установка (выполни на сервере):\n"
+            "  • Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y ffmpeg\n"
+            "  • CentOS/Fedora: sudo dnf install -y ffmpeg\n"
+            "  • macOS (brew): brew install ffmpeg\n"
+            "  • Windows (winget): winget install -e --id Gyan.FFmpeg\n\n"
+            "Либо задай точный путь к бинарнику через переменную окружения FFMPEG_PATH или поле config.FFMPEG_PATH.\n\n"
+            f"(Текущий путь к ffmpeg: {FFMPEG_BIN}, причина: {ffmpeg_info})"
+        )
+        return
+
     status_msg = await message.answer("Подготавливаю кружок...")
 
     try:
@@ -453,6 +486,23 @@ async def text_handler(message: types.Message) -> None:
 async def main() -> None:
     init_db()
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+
+    ok, info = check_ffmpeg(FFMPEG_BIN)
+    if ok:
+        logging.info(f"FFmpeg найден: {FFMPEG_BIN} — {info}")
+    else:
+        msg = (
+            f"❌ FFmpeg НЕ НАЙДЕН (использовался путь: {FFMPEG_BIN}). Причина: {info}\n"
+            f"   Установи FFmpeg:\n"
+            f"     • Linux/Debian/Ubuntu:  sudo apt-get update && sudo apt-get install -y ffmpeg\n"
+            f"     • Linux/CentOS/Fedora:  sudo dnf install -y ffmpeg\n"
+            f"     • macOS (brew):          brew install ffmpeg\n"
+            f"     • Windows (winget):      winget install -e --id Gyan.FFmpeg\n"
+            f"     • Или задай точный путь через переменную окружения FFMPEG_PATH или config.FFMPEG_PATH\n"
+            f"   Бот запустится, но отправка кружков будет падать с ошибкой."
+        )
+        logging.error(msg)
+
     await dp.start_polling(bot)
 
 
