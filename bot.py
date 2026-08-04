@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -189,6 +190,32 @@ FFMPEG_BIN: str = ""
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+_process_pool: concurrent.futures.ProcessPoolExecutor | None = None
+_io_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_concat_sem: asyncio.Semaphore | None = None
+
+
+def _get_pools() -> tuple[
+    concurrent.futures.ThreadPoolExecutor,
+    concurrent.futures.ProcessPoolExecutor | None,
+    asyncio.Semaphore,
+]:
+    global _io_pool, _process_pool, _concat_sem
+    if _io_pool is None:
+        import multiprocessing
+        cpu = min(4, max(1, (multiprocessing.cpu_count() or 1)))
+        _io_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(4, cpu * 2),
+            thread_name_prefix="bot_io",
+        )
+        try:
+            _process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=cpu)
+        except Exception:
+            _process_pool = None
+        _concat_sem = asyncio.Semaphore(max(1, cpu))
+    assert _io_pool is not None and _concat_sem is not None
+    return _io_pool, _process_pool, _concat_sem
+
 
 def _pid_alive(pid: int) -> bool:
     try:
@@ -376,7 +403,9 @@ def phrase_hash(letters: list[str]) -> str:
     return hashlib.md5("".join(letters).encode("utf-8")).hexdigest()
 
 
-def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
+def _concat_worker(
+    ffmpeg_bin: str, letter_paths: list[str], output_path: str,
+) -> bool:
     work_dir = tempfile.mkdtemp(prefix="tgletter_")
     list_file_path = os.path.join(work_dir, "files.txt")
     try:
@@ -384,7 +413,7 @@ def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
         for i, p in enumerate(letter_paths):
             norm_out = os.path.join(work_dir, f"norm_{i:04d}.mp4")
             norm_cmd = [
-                FFMPEG_BIN, "-y",
+                ffmpeg_bin, "-y",
                 "-i", p,
                 "-map", "0:v:0", "-map", "0:a:0?",
                 "-vf", "fps=30,format=yuv420p",
@@ -408,7 +437,7 @@ def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
 
         concat_out = os.path.join(work_dir, "concat.mp4")
         concat_cmd = [
-            FFMPEG_BIN, "-y",
+            ffmpeg_bin, "-y",
             "-f", "concat", "-safe", "0",
             "-i", list_file_path,
             "-c", "copy",
@@ -425,7 +454,7 @@ def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
             "setsar=1,format=yuv420p,fps=30"
         )
         reencode_cmd = [
-            FFMPEG_BIN, "-y",
+            ffmpeg_bin, "-y",
             "-t", "60",
             "-i", concat_out,
             "-vf", vf,
@@ -458,8 +487,43 @@ def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
             pass
 
 
+async def concat_letter_videos_async(letter_paths: list[str], output_path: str) -> bool:
+    io_pool, proc_pool, sem = _get_pools()
+    loop = asyncio.get_running_loop()
+    async with sem:
+        try:
+            if proc_pool is not None:
+                try:
+                    return await loop.run_in_executor(
+                        proc_pool,
+                        _concat_worker,
+                        FFMPEG_BIN, list(letter_paths), output_path,
+                    )
+                except Exception as e:
+                    logging.warning(f"process pool concat failed, fallback to thread: {e}")
+            return await loop.run_in_executor(
+                io_pool,
+                _concat_worker,
+                FFMPEG_BIN, list(letter_paths), output_path,
+            )
+        except concurrent.futures.CancelledError:
+            return False
+        except Exception as e:
+            logging.error(f"concat async error: {e}")
+            return False
+
+
+def concat_letter_videos(letter_paths: list[str], output_path: str) -> bool:
+    return _concat_worker(FFMPEG_BIN, letter_paths, output_path)
+
+
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
+    first_name = message.from_user.first_name if message.from_user else None
+    log_message(user_id, username, first_name, message.text or "/start")
+
     phrase_count = sum(1 for k in CACHE if k.startswith("phrase:"))
     await message.answer(
         "здарова бродяга, отправь мне любой текст, и я склею все буквы в один кружок телеграмма, "
@@ -471,6 +535,11 @@ async def command_start_handler(message: types.Message) -> None:
 
 @dp.message(Command("stats"))
 async def command_stats_handler(message: types.Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else None
+    first_name = message.from_user.first_name if message.from_user else None
+    log_message(user_id, username, first_name, message.text or "/stats")
+
     parts = (message.text or "").strip().split()
     if len(parts) < 2 or parts[1] != "56890":
         return
@@ -570,8 +639,7 @@ async def text_handler(message: types.Message) -> None:
     username = message.from_user.username if message.from_user else None
     first_name = message.from_user.first_name if message.from_user else None
 
-    if not text.startswith("/"):
-        log_message(user_id, username, first_name, text)
+    log_message(user_id, username, first_name, text)
 
     if text.startswith("/"):
         return
@@ -635,7 +703,7 @@ async def text_handler(message: types.Message) -> None:
                     video_note=CACHE[cache_key]
                 )
                 try:
-                    await status_msg.edit_text("Готово! Кружок отправлен (из кэша file_id).")
+                    await status_msg.edit_text("Готово!")
                 except Exception:
                     pass
                 return
@@ -647,10 +715,10 @@ async def text_handler(message: types.Message) -> None:
 
         if not os.path.exists(output_path):
             try:
-                await status_msg.edit_text(f"Склеиваю {len(letter_paths)} букв в один кружок...")
+                await status_msg.edit_text("Склеиваю видео...")
             except Exception:
                 pass
-            ok = concat_letter_videos(letter_paths, output_path)
+            ok = await concat_letter_videos_async(letter_paths, output_path)
             if not ok:
                 try:
                     await status_msg.edit_text(
@@ -674,7 +742,7 @@ async def text_handler(message: types.Message) -> None:
             logging.info(f"Сохранен file_id для фразы ({len(letters)} букв): {new_file_id}")
 
         try:
-            await status_msg.edit_text("Готово! Один кружок с фразой отправлен.")
+            await status_msg.edit_text("Готово!")
         except Exception:
             pass
 
