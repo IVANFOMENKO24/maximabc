@@ -13,11 +13,16 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import FSInputFile
 
-from config import BOT_TOKEN, CACHE_FILE, FFMPEG_PATH, LETTERS_FOLDER, PHRASE_CACHE_DIR, RUSSIAN_LETTERS
-
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "messages.db")
-
-os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
+from config import (
+    BOT_TOKEN,
+    CACHE_FILE,
+    DB_FILE,
+    FFMPEG_PATH,
+    LETTERS_FOLDER,
+    PHRASE_CACHE_DIR,
+    PID_FILE,
+    RUSSIAN_LETTERS,
+)
 
 
 def find_ffmpeg() -> str:
@@ -183,8 +188,6 @@ FFMPEG_BIN: str = ""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.pid")
 
 
 def _pid_alive(pid: int) -> bool:

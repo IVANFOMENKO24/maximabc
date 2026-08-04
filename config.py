@@ -38,9 +38,17 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("DATA_DIR") or BASE_DIR
+DATA_DIR = os.path.abspath(DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+
 LETTERS_FOLDER = os.path.join(BASE_DIR, "letters")
-CACHE_FILE = os.path.join(BASE_DIR, "file_ids_cache.json")
-PHRASE_CACHE_DIR = os.path.join(BASE_DIR, "phrase_cache")
+CACHE_FILE = os.path.join(DATA_DIR, "file_ids_cache.json")
+PHRASE_CACHE_DIR = os.path.join(DATA_DIR, "phrase_cache")
+DB_FILE = os.path.join(DATA_DIR, "messages.db")
+PID_FILE = os.path.join(DATA_DIR, "bot.pid")
+
+os.makedirs(PHRASE_CACHE_DIR, exist_ok=True)
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH") or None
 
